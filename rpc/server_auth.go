@@ -28,8 +28,9 @@ func (ss *simpleServer) authHandler(forType CredentialsType) (AuthHandler, error
 }
 
 const (
-	metadataFieldAuthorization     = "authorization"
-	authorizationValuePrefixBearer = "Bearer "
+	metadataFieldAuthorization       = "authorization"
+	metadataFieldWebRTCAuthorization = "webRTCAuthorization"
+	authorizationValuePrefixBearer   = "Bearer "
 )
 
 // JWTClaims extends jwt.RegisteredClaims with information about the credentials as well
@@ -112,6 +113,8 @@ func (ss *simpleServer) signAccessTokenForEntity(
 	return tokenString, nil
 }
 
+// CR erodkin: we want this (or something like it) for webrtc as well. Reuse? Or create new
+// auth interceptor?
 func (ss *simpleServer) authUnaryInterceptor(
 	ctx context.Context,
 	req interface{},
@@ -154,12 +157,12 @@ func (wrapped ctxWrappedServerStream) Context() context.Context {
 	return wrapped.ctx
 }
 
-func tokenFromContext(ctx context.Context) (string, error) {
+func tokenFromContext(ctx context.Context, authField string) (string, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return "", status.Error(codes.Unauthenticated, "authentication required")
 	}
-	authHeader := md.Get(metadataFieldAuthorization)
+	authHeader := md.Get(authField)
 	if len(authHeader) != 1 {
 		return "", status.Error(codes.Unauthenticated, "authentication required")
 	}
@@ -169,8 +172,17 @@ func tokenFromContext(ctx context.Context) (string, error) {
 	return strings.TrimPrefix(authHeader[0], authorizationValuePrefixBearer), nil
 }
 
+func authTokenFromContext(ctx context.Context) (string, error) {
+	return tokenFromContext(ctx, metadataFieldAuthorization)
+}
+
+func webRTCAuthTokenFromContext(ctx context.Context) (string, error) {
+	return tokenFromContext(ctx, metadataFieldWebRTCAuthorization)
+}
+
 var errNotTLSAuthed = errors.New("not authenticated via TLS")
 
+// CR erodkin: we should have something like ensureAuthed that's webRTC specific probably?
 func (ss *simpleServer) ensureAuthed(ctx context.Context) (interface{}, error) {
 	tokenString, err := tokenFromContext(ctx)
 	if err != nil {
