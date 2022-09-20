@@ -35,10 +35,10 @@ type webrtcClientChannel struct {
 	*webrtcBaseChannel
 	mu              sync.Mutex
 	streamIDCounter uint64
-	streams         map[uint64]activeWebRTCClienStream
+	streams         map[uint64]activeWebRTCClientStream
 }
 
-type activeWebRTCClienStream struct {
+type activeWebRTCClientStream struct {
 	cs     *webrtcClientStream
 	cancel func()
 }
@@ -59,7 +59,7 @@ func newWebRTCClientChannel(
 	)
 	ch := &webrtcClientChannel{
 		webrtcBaseChannel: base,
-		streams:           map[uint64]activeWebRTCClienStream{},
+		streams:           map[uint64]activeWebRTCClientStream{},
 	}
 	dataChannel.OnMessage(ch.onChannelMessage)
 	return ch
@@ -69,7 +69,9 @@ func newWebRTCClientChannel(
 func (ch *webrtcClientChannel) Close() error {
 	ch.mu.Lock()
 	for _, s := range ch.streams {
-		s.cancel()
+		if err := s.cs.Close(); err != nil {
+			s.cs.logger.Errorw("error closing stream", "error", err)
+		}
 	}
 	ch.mu.Unlock()
 	return ch.webrtcBaseChannel.Close()
@@ -94,7 +96,7 @@ func (ch *webrtcClientChannel) Invoke(
 	return err
 }
 
-func (ch *webrtcClientChannel) invoke(ctx context.Context, method string, args interface{}, reply interface{}) error {
+func (ch *webrtcClientChannel) invoke(ctx context.Context, method string, args, reply interface{}) error {
 	clientStream, err := ch.newStream(ctx, ch.nextStreamID())
 	if err != nil {
 		return err
@@ -202,7 +204,7 @@ func (ch *webrtcClientChannel) newStream(ctx context.Context, stream *webrtcpb.S
 			ch.removeStreamByID,
 			ch.webrtcBaseChannel.logger.With("id", id),
 		)
-		activeStream = activeWebRTCClienStream{clientStream, cancel}
+		activeStream = activeWebRTCClientStream{clientStream, cancel}
 		ch.streams[id] = activeStream
 	}
 	ch.mu.Unlock()
@@ -250,6 +252,15 @@ func (ch *webrtcClientChannel) writeMessage(stream *webrtcpb.Stream, msg *webrtc
 		Stream: stream,
 		Type: &webrtcpb.Request_Message{
 			Message: msg,
+		},
+	})
+}
+
+func (ch *webrtcClientChannel) writeReset(stream *webrtcpb.Stream) error {
+	return ch.webrtcBaseChannel.write(&webrtcpb.Request{
+		Stream: stream,
+		Type: &webrtcpb.Request_RstStream{
+			RstStream: true,
 		},
 	})
 }

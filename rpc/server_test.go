@@ -5,10 +5,11 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 
 	"go.viam.com/utils"
@@ -166,7 +168,7 @@ func TestServer(t *testing.T) {
 							test.That(t, err, test.ShouldBeNil)
 							defer httpResp1.Body.Close()
 							test.That(t, httpResp1.StatusCode, test.ShouldEqual, 200)
-							rd, err := ioutil.ReadAll(httpResp1.Body)
+							rd, err := io.ReadAll(httpResp1.Body)
 							test.That(t, err, test.ShouldBeNil)
 							if withAuthentication {
 								test.That(t, httpResp1.Header["Grpc-Message"], test.ShouldResemble, []string{"authentication required"})
@@ -180,7 +182,7 @@ func TestServer(t *testing.T) {
 								test.That(t, err, test.ShouldBeNil)
 								defer httpResp2.Body.Close()
 								test.That(t, httpResp2.StatusCode, test.ShouldEqual, 200)
-								rd, err = ioutil.ReadAll(httpResp2.Body)
+								rd, err = io.ReadAll(httpResp2.Body)
 								test.That(t, err, test.ShouldBeNil)
 							}
 							// it says hey!
@@ -198,7 +200,7 @@ func TestServer(t *testing.T) {
 							defer httpResp2.Body.Close()
 							test.That(t, httpResp2.StatusCode, test.ShouldEqual, 200)
 							es.SetFail(false)
-							rd, err = ioutil.ReadAll(httpResp2.Body)
+							rd, err = io.ReadAll(httpResp2.Body)
 							test.That(t, err, test.ShouldBeNil)
 							// it says hey!
 							test.That(t, httpResp2.Header["Grpc-Message"], test.ShouldResemble, []string{"whoops"})
@@ -435,4 +437,62 @@ func TestServerUnauthenticatedOption(t *testing.T) {
 		})),
 	)
 	test.That(t, err, test.ShouldEqual, errMixedUnauthAndAuth)
+}
+
+type fakeStatsHandler struct {
+	serverConnections int
+	clientConnections int
+	mu                sync.Mutex
+}
+
+func (s *fakeStatsHandler) TagRPC(ctx context.Context, info *stats.RPCTagInfo) context.Context {
+	return ctx
+}
+func (s *fakeStatsHandler) HandleRPC(ctx context.Context, info stats.RPCStats) {}
+func (s *fakeStatsHandler) TagConn(ctx context.Context, info *stats.ConnTagInfo) context.Context {
+	return ctx
+}
+
+// HandleConn processes the Conn stats.
+func (s *fakeStatsHandler) HandleConn(ctx context.Context, info stats.ConnStats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if info.IsClient() {
+		if _, ok := info.(*stats.ConnBegin); ok {
+			s.clientConnections++
+		}
+	} else {
+		if _, ok := info.(*stats.ConnBegin); ok {
+			s.serverConnections++
+		}
+	}
+}
+
+func TestWithStatsHandler(t *testing.T) {
+	logger := golog.NewTestLogger(t)
+
+	handler := fakeStatsHandler{}
+
+	rpcServer, err := NewServer(
+		logger,
+		WithUnauthenticated(),
+		WithStatsHandler(&handler),
+	)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, rpcServer.Start(), test.ShouldBeNil)
+
+	conn, err := Dial(
+		context.Background(),
+		rpcServer.InternalAddr().String(),
+		logger,
+		WithInsecure(),
+		WithDialDebug(),
+	)
+	test.That(t, err, test.ShouldBeNil)
+
+	test.That(t, handler.serverConnections, test.ShouldBeGreaterThan, 1)
+
+	test.That(t, conn.Close(), test.ShouldBeNil)
+	test.That(t, rpcServer.Stop(), test.ShouldBeNil)
 }

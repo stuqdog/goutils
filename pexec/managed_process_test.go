@@ -1,16 +1,20 @@
 package pexec
 
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/edaniels/golog"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
 	"go.viam.com/test"
+
+	"go.viam.com/utils"
 )
 
 func TestManagedProcessID(t *testing.T) {
@@ -47,7 +51,7 @@ func TestManagedProcessStart(t *testing.T) {
 		})
 		t.Run("starting with an eventually canceled context should fail", func(t *testing.T) {
 			logger := golog.NewTestLogger(t)
-			temp, err := ioutil.TempFile("", "*.txt")
+			temp, err := os.CreateTemp("", "*.txt")
 			test.That(t, err, test.ShouldBeNil)
 			defer os.Remove(temp.Name())
 
@@ -74,7 +78,7 @@ func TestManagedProcessStart(t *testing.T) {
 		t.Run("starting with a normal context", func(t *testing.T) {
 			logger := golog.NewTestLogger(t)
 
-			temp, err := ioutil.TempFile("", "*.txt")
+			temp, err := os.CreateTemp("", "*.txt")
 			test.That(t, err, test.ShouldBeNil)
 			defer os.Remove(temp.Name())
 			proc := NewManagedProcess(ProcessConfig{
@@ -84,7 +88,7 @@ func TestManagedProcessStart(t *testing.T) {
 			}, logger)
 			test.That(t, proc.Start(context.Background()), test.ShouldBeNil)
 
-			rd, err := ioutil.ReadFile(temp.Name())
+			rd, err := os.ReadFile(temp.Name())
 			test.That(t, err, test.ShouldBeNil)
 			test.That(t, string(rd), test.ShouldEqual, "hello\n")
 
@@ -114,7 +118,7 @@ func TestManagedProcessStart(t *testing.T) {
 		t.Run("starting with a normal context should run until stop", func(t *testing.T) {
 			logger := golog.NewTestLogger(t)
 
-			temp, err := ioutil.TempFile("", "*.txt")
+			temp, err := os.CreateTemp("", "*.txt")
 			test.That(t, err, test.ShouldBeNil)
 			defer os.Remove(temp.Name())
 
@@ -139,7 +143,7 @@ func TestManagedProcessStart(t *testing.T) {
 
 			test.That(t, proc.Stop(), test.ShouldBeNil)
 
-			rd, err := ioutil.ReadFile(temp.Name())
+			rd, err := os.ReadFile(temp.Name())
 			test.That(t, err, test.ShouldBeNil)
 			test.That(t, string(rd), test.ShouldEqual, "hello\nworld\n")
 		})
@@ -150,7 +154,7 @@ func TestManagedProcessManage(t *testing.T) {
 	t.Run("a managed process that dies should be restarted", func(t *testing.T) {
 		logger := golog.NewTestLogger(t)
 
-		temp, err := ioutil.TempFile("", "*.txt")
+		temp, err := os.CreateTemp("", "*.txt")
 		test.That(t, err, test.ShouldBeNil)
 		defer os.Remove(temp.Name())
 
@@ -203,7 +207,7 @@ func TestManagedProcessStop(t *testing.T) {
 	t.Run("stopping a managed process gives it a chance to finish", func(t *testing.T) {
 		logger := golog.NewTestLogger(t)
 
-		temp, err := ioutil.TempFile("", "*.txt")
+		temp, err := os.CreateTemp("", "*.txt")
 		test.That(t, err, test.ShouldBeNil)
 		defer os.Remove(temp.Name())
 
@@ -245,6 +249,49 @@ func TestManagedProcessStop(t *testing.T) {
 
 		err = proc.Stop()
 		test.That(t, err, test.ShouldBeNil)
+	})
+}
+
+func TestManagedProcessLogWriter(t *testing.T) {
+	t.Run("Extract output of a one shot", func(t *testing.T) {
+		logger := golog.NewTestLogger(t)
+		logReader, logWriter := io.Pipe()
+		proc := NewManagedProcess(ProcessConfig{
+			Name:      "bash",
+			Args:      []string{"-c", "echo hello"},
+			OneShot:   true,
+			LogWriter: logWriter,
+		}, logger)
+		var activeReaders sync.WaitGroup
+		activeReaders.Add(1)
+		utils.PanicCapturingGo(func() {
+			defer activeReaders.Done()
+			bufferedLogReader := bufio.NewReader(logReader)
+			line, err := bufferedLogReader.ReadString('\n')
+			test.That(t, err, test.ShouldBeNil)
+			test.That(t, line, test.ShouldEqual, "hello\n")
+		})
+		test.That(t, proc.Start(context.Background()), test.ShouldBeNil)
+		activeReaders.Wait()
+		test.That(t, proc.Stop(), test.ShouldBeNil)
+	})
+
+	t.Run("Get log lines from a process", func(t *testing.T) {
+		logger := golog.NewTestLogger(t)
+		logReader, logWriter := io.Pipe()
+		proc := NewManagedProcess(ProcessConfig{
+			Name:      "bash",
+			Args:      []string{"-c", "echo hello"},
+			LogWriter: logWriter,
+		}, logger)
+		test.That(t, proc.Start(context.Background()), test.ShouldBeNil)
+		bufferedLogReader := bufio.NewReader(logReader)
+		for i := 0; i < 5; i++ {
+			line, err := bufferedLogReader.ReadString('\n')
+			test.That(t, err, test.ShouldBeNil)
+			test.That(t, line, test.ShouldEqual, "hello\n")
+		}
+		test.That(t, proc.Stop(), test.ShouldBeNil)
 	})
 }
 
